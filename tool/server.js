@@ -4,9 +4,10 @@ const ytdl = require('ytdl-core');
 const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs');
+require('dotenv').config();
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -14,9 +15,22 @@ if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
 
-app.use(cors());
+// CORS configuration
+const corsOptions = {
+    origin: process.env.CORS_ORIGIN || '*',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
-app.use(express.static('.')); // Serve static files from current directory
+app.use(express.static(path.join(__dirname))); // Serve static files
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).json({ error: 'Something went wrong!' });
+});
 
 // Check if FFmpeg is installed
 function checkFFmpeg() {
@@ -36,7 +50,11 @@ function checkFFmpeg() {
 app.get('/status', async (req, res) => {
     try {
         await checkFFmpeg();
-        res.json({ status: 'ok', message: 'Server is running and FFmpeg is installed' });
+        res.json({ 
+            status: 'ok', 
+            message: 'Server is running and FFmpeg is installed',
+            version: require('./package.json').version
+        });
     } catch (error) {
         res.status(500).json({ status: 'error', message: error.message });
     }
@@ -51,6 +69,15 @@ app.get('/video-info', async (req, res) => {
         }
 
         const info = await ytdl.getInfo(videoUrl);
+        
+        // Check video duration
+        const maxDuration = process.env.MAX_VIDEO_DURATION || 300; // 5 minutes
+        if (parseInt(info.videoDetails.lengthSeconds) > maxDuration) {
+            return res.status(400).json({ 
+                error: `Video is too long. Maximum duration is ${maxDuration} seconds.` 
+            });
+        }
+
         res.json({
             title: info.videoDetails.title,
             duration: info.videoDetails.lengthSeconds,
@@ -80,6 +107,14 @@ app.post('/process-video', async (req, res) => {
 
         if (!videoUrl) {
             return res.status(400).json({ error: 'Video URL is required' });
+        }
+
+        // Validate duration
+        const maxOutputDuration = process.env.MAX_OUTPUT_DURATION || 60;
+        if (duration > maxOutputDuration) {
+            return res.status(400).json({ 
+                error: `Output duration cannot exceed ${maxOutputDuration} seconds` 
+            });
         }
 
         // Generate unique filename
@@ -125,7 +160,6 @@ app.post('/process-video', async (req, res) => {
             .videoBitrate(qualitySettings.bitrate);
 
         // Apply aspect ratio with padding
-        const [targetWidth, targetHeight] = aspectRatio.split(':').map(Number);
         ffmpegCommand.videoFilters([
             {
                 filter: 'scale',
@@ -222,25 +256,30 @@ app.get('/download/:filename', (req, res) => {
 });
 
 // Cleanup old files periodically
+const cleanupInterval = parseInt(process.env.CLEANUP_INTERVAL) || 3600000; // 1 hour
 setInterval(() => {
     fs.readdir(uploadsDir, (err, files) => {
         if (err) return;
         
         const now = Date.now();
         files.forEach(file => {
+            if (file === '.gitkeep') return;
+            
             const filePath = path.join(uploadsDir, file);
             fs.stat(filePath, (err, stats) => {
                 if (err) return;
                 
                 // Delete files older than 1 hour
-                if (now - stats.mtime.getTime() > 3600000) {
+                if (now - stats.mtime.getTime() > cleanupInterval) {
                     fs.unlink(filePath, () => {});
                 }
             });
         });
     });
-}, 3600000); // Run every hour
+}, cleanupInterval);
 
+// Start server
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
+    console.log('Environment:', process.env.NODE_ENV || 'development');
 }); 
